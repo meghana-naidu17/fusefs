@@ -1,0 +1,11 @@
+*.o
+*.a
+*.so
+*.img
+*.log
+build/
+bin/
+.vscode/
+.idea/
+.DS_Store
+core
