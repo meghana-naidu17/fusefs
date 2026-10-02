@@ -1,7 +1,7 @@
 #define _DEFAULT_SOURCE
 
 #include "fusefs.h"
-
+FileSystem fusefs_fs;
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -139,9 +139,10 @@ int fusefs_rmdir(
 
 int fusefs_init_filesystem(void)
 {
-    return 0;
+    return fs_init(&fusefs_fs, "fusefs.img");
 }
 
 void fusefs_destroy_filesystem(void)
 {
+    fs_shutdown(&fusefs_fs);
 }

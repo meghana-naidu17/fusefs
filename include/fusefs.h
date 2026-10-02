@@ -8,9 +8,15 @@
 #include <sys/stat.h>
 #include <stddef.h>
 
+#include "fs.h"
+
 #define FUSEFS_ROOT_INODE 0
 
-int fusefs_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi);
+int fusefs_getattr(
+    const char *path,
+    struct stat *stbuf,
+    struct fuse_file_info *fi
+);
 
 int fusefs_readdir(
     const char *path,
@@ -70,5 +76,7 @@ int fusefs_rmdir(
 int fusefs_init_filesystem(void);
 
 void fusefs_destroy_filesystem(void);
+
+extern FileSystem fusefs_fs;
 
 #endif
