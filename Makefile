@@ -8,7 +8,9 @@ LDFLAGS = $(shell pkg-config fuse3 --libs)
 TARGET = fusefs
 
 SRC = src/main.c \
-      src/fuse_ops.c
+      src/fuse_ops.c \
+      src/inode.c \
+      src/file.c
 
 OBJ = $(SRC:.c=.o)
 

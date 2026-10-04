@@ -1,27 +1,21 @@
 #define _DEFAULT_SOURCE
 
 #include "fusefs.h"
+#include "inode.h"
+#include "file.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
-int fusefs_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi)
+int fusefs_getattr(
+    const char *path,
+    struct stat *stbuf,
+    struct fuse_file_info *fi)
 {
     (void)fi;
 
-    memset(stbuf, 0, sizeof(struct stat));
-
-    if (strcmp(path, "/") == 0)
-    {
-        stbuf->st_mode = S_IFDIR | 0755;
-        stbuf->st_nlink = 2;
-        return 0;
-    }
-
-    return -ENOENT;
+    return file_getattr(path, stbuf);
 }
 
 int fusefs_readdir(
@@ -36,11 +30,54 @@ int fusefs_readdir(
     (void)fi;
     (void)flags;
 
-    if (strcmp(path, "/") != 0)
+    Inode *directory = inode_lookup_path(path);
+
+    if (directory == NULL)
         return -ENOENT;
+
+    if (directory->type != INODE_DIRECTORY)
+        return -ENOTDIR;
 
     filler(buffer, ".", NULL, 0, 0);
     filler(buffer, "..", NULL, 0, 0);
+
+    for (size_t i = 0; i < directory->entry_count; i++)
+    {
+        DirectoryEntry *entry = &directory->entries[i];
+
+        Inode *child =
+            inode_lookup(entry->inode_number);
+
+        if (child == NULL)
+            continue;
+
+        struct stat st;
+
+        if (file_getattr(
+                path,
+                &st) != 0)
+        {
+            memset(&st, 0, sizeof(st));
+        }
+
+        st.st_ino = child->inode_number;
+        st.st_mode = child->mode;
+        st.st_nlink = child->link_count;
+        st.st_uid = child->uid;
+        st.st_gid = child->gid;
+        st.st_size = child->size;
+        st.st_atim = child->atime;
+        st.st_mtim = child->mtime;
+        st.st_ctim = child->ctime;
+
+        filler(
+            buffer,
+            entry->name,
+            &st,
+            0,
+            0
+        );
+    }
 
     return 0;
 }
@@ -49,10 +86,17 @@ int fusefs_open(
     const char *path,
     struct fuse_file_info *fi)
 {
-    (void)path;
     (void)fi;
 
-    return -ENOENT;
+    Inode *inode = file_lookup(path);
+
+    if (inode == NULL)
+        return -ENOENT;
+
+    if (inode->type != INODE_FILE)
+        return -EISDIR;
+
+    return 0;
 }
 
 int fusefs_read(
@@ -62,13 +106,14 @@ int fusefs_read(
     off_t offset,
     struct fuse_file_info *fi)
 {
-    (void)path;
-    (void)buffer;
-    (void)size;
-    (void)offset;
     (void)fi;
 
-    return -ENOENT;
+    return (int)file_read(
+        path,
+        buffer,
+        size,
+        offset
+    );
 }
 
 int fusefs_write(
@@ -78,13 +123,14 @@ int fusefs_write(
     off_t offset,
     struct fuse_file_info *fi)
 {
-    (void)path;
-    (void)buffer;
-    (void)size;
-    (void)offset;
     (void)fi;
 
-    return -EROFS;
+    return (int)file_write(
+        path,
+        buffer,
+        size,
+        offset
+    );
 }
 
 int fusefs_create(
@@ -92,19 +138,15 @@ int fusefs_create(
     mode_t mode,
     struct fuse_file_info *fi)
 {
-    (void)path;
-    (void)mode;
     (void)fi;
 
-    return -EROFS;
+    return file_create(path, mode);
 }
 
 int fusefs_unlink(
     const char *path)
 {
-    (void)path;
-
-    return -EROFS;
+    return file_delete(path);
 }
 
 int fusefs_truncate(
@@ -112,36 +154,30 @@ int fusefs_truncate(
     off_t size,
     struct fuse_file_info *fi)
 {
-    (void)path;
-    (void)size;
     (void)fi;
 
-    return -EROFS;
+    return file_truncate(path, size);
 }
 
 int fusefs_mkdir(
     const char *path,
     mode_t mode)
 {
-    (void)path;
-    (void)mode;
-
-    return -EROFS;
+    return directory_create(path, mode);
 }
 
 int fusefs_rmdir(
     const char *path)
 {
-    (void)path;
-
-    return -EROFS;
+    return directory_delete(path);
 }
 
 int fusefs_init_filesystem(void)
 {
-    return 0;
+    return inode_table_init();
 }
 
 void fusefs_destroy_filesystem(void)
 {
+    inode_table_destroy();
 }
