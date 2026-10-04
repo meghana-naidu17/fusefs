@@ -10,7 +10,10 @@ TARGET = fusefs
 SRC = src/main.c \
       src/fuse_ops.c \
       src/inode.c \
-      src/file.c
+      src/file.c \
+      src/fs.c \
+      src/block.c \
+      src/bitmap.c
 
 OBJ = $(SRC:.c=.o)
 

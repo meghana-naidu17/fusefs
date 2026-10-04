@@ -3,10 +3,13 @@
 #include "fusefs.h"
 #include "inode.h"
 #include "file.h"
+#include "fs.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+
+FileSystem fusefs_fs;
 
 int fusefs_getattr(
     const char *path,
@@ -43,7 +46,8 @@ int fusefs_readdir(
 
     for (size_t i = 0; i < directory->entry_count; i++)
     {
-        DirectoryEntry *entry = &directory->entries[i];
+        DirectoryEntry *entry =
+            &directory->entries[i];
 
         Inode *child =
             inode_lookup(entry->inode_number);
@@ -52,13 +56,7 @@ int fusefs_readdir(
             continue;
 
         struct stat st;
-
-        if (file_getattr(
-                path,
-                &st) != 0)
-        {
-            memset(&st, 0, sizeof(st));
-        }
+        memset(&st, 0, sizeof(st));
 
         st.st_ino = child->inode_number;
         st.st_mode = child->mode;
@@ -174,10 +172,20 @@ int fusefs_rmdir(
 
 int fusefs_init_filesystem(void)
 {
-    return inode_table_init();
+    if (fs_init(&fusefs_fs, "fusefs.img") != 0)
+        return -1;
+
+    if (inode_table_init() != 0)
+    {
+        fs_shutdown(&fusefs_fs);
+        return -1;
+    }
+
+    return 0;
 }
 
 void fusefs_destroy_filesystem(void)
 {
     inode_table_destroy();
+    fs_shutdown(&fusefs_fs);
 }
