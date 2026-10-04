@@ -1,6 +1,10 @@
 #define _GNU_SOURCE
 
 #include "file.h"
+#include "block.h"
+#include "fs.h"
+
+extern FileSystem fusefs_fs;
 
 #include <errno.h>
 #include <stdlib.h>
@@ -149,6 +153,19 @@ int file_delete(const char *path)
     if (inode->type != INODE_FILE)
         return -EISDIR;
 
+    /*
+     * Release all storage blocks belonging to the file.
+     */
+    for (size_t i = 0; i < inode->block_count; i++)
+    {
+        if (block_free(
+                &fusefs_fs,
+                inode->direct_blocks[i]) < 0)
+        {
+            return -EIO;
+        }
+    }
+
     result = inode_remove_entry(
         parent->inode_number,
         name
@@ -161,6 +178,7 @@ int file_delete(const char *path)
 }
 
 /* Read file data */
+
 ssize_t file_read(
     const char *path,
     void *buffer,
@@ -182,12 +200,7 @@ ssize_t file_read(
     if (inode->type != INODE_FILE)
         return -EISDIR;
 
-    /*
-     * Storage integration will use the block layer.
-     * For now, return EOF for files without allocated
-     * data blocks.
-     */
-    if (offset >= inode->size)
+    if (offset >= inode->size || size == 0)
         return 0;
 
     size_t available =
@@ -196,7 +209,66 @@ ssize_t file_read(
     if (size > available)
         size = available;
 
-    memset(buffer, 0, size);
+    size_t block_size = fusefs_fs.sb.block_size;
+    size_t bytes_read = 0;
+
+    while (bytes_read < size)
+    {
+        off_t current_offset =
+            offset + (off_t)bytes_read;
+
+        size_t block_index =
+            (size_t)(current_offset / (off_t)block_size);
+
+        size_t block_offset =
+            (size_t)(current_offset % (off_t)block_size);
+
+        if (block_index >= MAX_DIRECT_BLOCKS)
+            return -EFBIG;
+
+        size_t remaining = size - bytes_read;
+        size_t bytes_in_block =
+            block_size - block_offset;
+
+        if (remaining > bytes_in_block)
+            remaining = bytes_in_block;
+
+        if (block_index >= inode->block_count)
+        {
+            memset(
+                (char *)buffer + bytes_read,
+                0,
+                remaining
+            );
+        }
+        else
+        {
+            uint8_t *block_buffer =
+                malloc(block_size);
+
+            if (block_buffer == NULL)
+                return -ENOMEM;
+
+            if (block_read(
+                    &fusefs_fs,
+                    inode->direct_blocks[block_index],
+                    block_buffer) < 0)
+            {
+                free(block_buffer);
+                return -EIO;
+            }
+
+            memcpy(
+                (char *)buffer + bytes_read,
+                block_buffer + block_offset,
+                remaining
+            );
+
+            free(block_buffer);
+        }
+
+        bytes_read += remaining;
+    }
 
     inode_update_times(
         inode->inode_number,
@@ -204,7 +276,7 @@ ssize_t file_read(
         0
     );
 
-    return (ssize_t)size;
+    return (ssize_t)bytes_read;
 }
 
 /* Write file data */
@@ -232,12 +304,108 @@ ssize_t file_write(
     if (size == 0)
         return 0;
 
-    /*
-     * The actual block allocation and data writing
-     * will be connected to Member 2's storage layer.
-     */
+    size_t block_size = fusefs_fs.sb.block_size;
 
-    off_t new_size = offset + (off_t)size;
+    if (size > (size_t)MAX_DIRECT_BLOCKS * block_size)
+        return -EFBIG;
+
+    if ((uint64_t)offset + (uint64_t)size >
+        (uint64_t)MAX_DIRECT_BLOCKS * block_size)
+        return -EFBIG;
+
+    size_t bytes_written = 0;
+
+    while (bytes_written < size)
+    {
+        off_t current_offset =
+            offset + (off_t)bytes_written;
+
+        size_t block_index =
+            (size_t)(current_offset / (off_t)block_size);
+
+        size_t block_offset =
+            (size_t)(current_offset % (off_t)block_size);
+
+        if (block_index >= MAX_DIRECT_BLOCKS)
+            return -EFBIG;
+
+        size_t remaining = size - bytes_written;
+        size_t bytes_in_block =
+            block_size - block_offset;
+
+        if (remaining > bytes_in_block)
+            remaining = bytes_in_block;
+
+        /*
+         * Allocate a new storage block when this
+         * file block does not exist yet.
+         */
+        if (block_index >= inode->block_count)
+        {
+            uint32_t new_block;
+
+            if (block_allocate(
+                    &fusefs_fs,
+                    &new_block) < 0)
+            {
+                return bytes_written > 0
+                    ? (ssize_t)bytes_written
+                    : -ENOSPC;
+            }
+
+            inode->direct_blocks[block_index] = new_block;
+            inode->block_count++;
+        }
+
+        uint8_t *block_buffer =
+            malloc(block_size);
+
+        if (block_buffer == NULL)
+            return bytes_written > 0
+                ? (ssize_t)bytes_written
+                : -ENOMEM;
+
+        /*
+         * Read the existing block first so that a
+         * partial write does not destroy other data.
+         */
+        if (block_read(
+                &fusefs_fs,
+                inode->direct_blocks[block_index],
+                block_buffer) < 0)
+        {
+            free(block_buffer);
+
+            return bytes_written > 0
+                ? (ssize_t)bytes_written
+                : -EIO;
+        }
+
+        memcpy(
+            block_buffer + block_offset,
+            (const char *)buffer + bytes_written,
+            remaining
+        );
+
+        if (block_write(
+                &fusefs_fs,
+                inode->direct_blocks[block_index],
+                block_buffer) < 0)
+        {
+            free(block_buffer);
+
+            return bytes_written > 0
+                ? (ssize_t)bytes_written
+                : -EIO;
+        }
+
+        free(block_buffer);
+
+        bytes_written += remaining;
+    }
+
+    off_t new_size =
+        offset + (off_t)bytes_written;
 
     if (new_size > inode->size)
     {
@@ -257,7 +425,7 @@ ssize_t file_write(
         1
     );
 
-    return (ssize_t)size;
+    return (ssize_t)bytes_written;
 }
 
 /* Create a directory */
@@ -470,8 +638,105 @@ int file_truncate(
     if (inode->type != INODE_FILE)
         return -EISDIR;
 
-    return inode_update_size(
+    size_t block_size = fusefs_fs.sb.block_size;
+
+    if ((uint64_t)size >
+        (uint64_t)MAX_DIRECT_BLOCKS * block_size)
+        return -EFBIG;
+
+    /*
+     * Shrinking the file:
+     * free blocks that are completely beyond the new size.
+     */
+    if (size < inode->size)
+    {
+        size_t required_blocks = 0;
+
+        if (size > 0)
+        {
+            required_blocks =
+                ((size_t)size + block_size - 1) /
+                block_size;
+        }
+
+        while (inode->block_count > required_blocks)
+        {
+            size_t index = inode->block_count - 1;
+
+            if (block_free(
+                    &fusefs_fs,
+                    inode->direct_blocks[index]) < 0)
+            {
+                return -EIO;
+            }
+
+            inode->block_count--;
+        }
+
+        /*
+         * If the new size ends in the middle of a block,
+         * clear the bytes after EOF so old data is not
+         * exposed if the file grows again later.
+         */
+        if (size > 0 &&
+            (size % block_size) != 0 &&
+            inode->block_count > 0)
+        {
+            size_t last_index =
+                inode->block_count - 1;
+
+            uint8_t *block_buffer =
+                malloc(block_size);
+
+            if (block_buffer == NULL)
+                return -ENOMEM;
+
+            if (block_read(
+                    &fusefs_fs,
+                    inode->direct_blocks[last_index],
+                    block_buffer) < 0)
+            {
+                free(block_buffer);
+                return -EIO;
+            }
+
+            size_t valid_bytes =
+                (size_t)size % block_size;
+
+            memset(
+                block_buffer + valid_bytes,
+                0,
+                block_size - valid_bytes
+            );
+
+            if (block_write(
+                    &fusefs_fs,
+                    inode->direct_blocks[last_index],
+                    block_buffer) < 0)
+            {
+                free(block_buffer);
+                return -EIO;
+            }
+
+            free(block_buffer);
+        }
+    }
+
+    int result =
+        inode_update_size(
+            inode->inode_number,
+            size
+        );
+
+    if (result != 0)
+        return result;
+
+    inode_update_times(
         inode->inode_number,
-        size
+        0,
+        1
     );
+
+    return 0;
 }
+
